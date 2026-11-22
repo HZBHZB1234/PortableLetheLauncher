@@ -6,6 +6,8 @@ mod http;
 mod launcher;
 mod logger;
 mod manifest;
+mod news;
+mod profiles;
 mod steam;
 mod updater;
 mod verifier;
@@ -15,8 +17,12 @@ pub fn run() {
     // Initialize logger
     logger::init_logger();
 
-    // Create default config if missing
+    // Create default config if missing, then initialise the profile layout
+    // (and migrate a legacy root-level token into the default profile).
     config::create_default_config();
+    if let Err(e) = profiles::init() {
+        lethe_log!("Profile initialisation failed: {}", e);
+    }
 
     // Log working directory for debugging
     if let Ok(cwd) = std::env::current_dir() {
@@ -49,6 +55,20 @@ pub fn run() {
             commands::set_setting,
             commands::get_mods,
             commands::toggle_mod,
+            commands::profile_list,
+            commands::profile_get,
+            commands::profile_create,
+            commands::profile_update,
+            commands::profile_delete,
+            commands::profile_switch,
+            commands::profile_test_connection,
+            commands::server_url_test,
+            commands::profile_login_status,
+            commands::profile_addresses,
+            commands::profile_apply_same_machine,
+            commands::profile_plugin_files,
+            commands::get_diagnostics,
+            commands::get_news,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

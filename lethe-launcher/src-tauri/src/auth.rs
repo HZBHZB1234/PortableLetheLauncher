@@ -1,11 +1,20 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const AUTH_SERVER: &str = "https://api.lethelc.site";
 const AUTH_FILE: &str = "lethe-auth.json";
 const POLL_INTERVAL_MS: u64 = 1000;
 const LOGIN_TIMEOUT_SECS: u64 = 120;
+
+/// Cached token is bound to the profile it was loaded for. A profile switch
+/// clears this cache, so a stale frontend token can never be injected.
+static AUTH_CACHE: OnceLock<Mutex<Option<(String, AuthResult)>>> = OnceLock::new();
+
+fn auth_cache() -> &'static Mutex<Option<(String, AuthResult)>> {
+    AUTH_CACHE.get_or_init(|| Mutex::new(None))
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AuthResult {
@@ -24,15 +33,25 @@ struct PollResponse {
 pub async fn start_oauth_flow() -> Result<AuthResult, String> {
     // 1. Generate a random session ID (same algorithm as LetheHooks.GenerateSessionID)
     let session_id = generate_session_id();
-    let login_url = format!("{}/auth/login?session_id={}&launcher=true", AUTH_SERVER, session_id);
+    let auth_base = crate::profiles::active_profile().auth_base_url;
+    let auth_base = auth_base.trim_end_matches('/');
+    let login_url = format!(
+        "{}/auth/login?session_id={}&launcher=true",
+        auth_base, session_id
+    );
+    crate::lethe_log!("Login target: {}", auth_base);
 
     // 2. Open browser
     crate::lethe_log!("Opening browser: {}", login_url);
     open_browser(&login_url)?;
 
     // 3. Poll for token
-    let poll_url = format!("{}/auth/token/poll", AUTH_SERVER);
-    crate::lethe_log!("Polling {} for token (timeout: {}s)...", poll_url, LOGIN_TIMEOUT_SECS);
+    let poll_url = format!("{}/auth/token/poll", auth_base);
+    crate::lethe_log!(
+        "Polling {} for token (timeout: {}s)...",
+        poll_url,
+        LOGIN_TIMEOUT_SECS
+    );
 
     let client = reqwest::Client::new();
     let start = Instant::now();
@@ -54,7 +73,9 @@ pub async fn start_oauth_flow() -> Result<AuthResult, String> {
             Ok(resp) => {
                 match resp.status().as_u16() {
                     200 => {
-                        let body = resp.text().await
+                        let body = resp
+                            .text()
+                            .await
                             .map_err(|e| format!("Failed to read poll response: {}", e))?;
                         crate::lethe_log!("Poll response body: {}", &body[..body.len().min(500)]);
                         let data: PollResponse = serde_json::from_str(&body)
@@ -67,15 +88,25 @@ pub async fn start_oauth_flow() -> Result<AuthResult, String> {
                             let username = claims.name.unwrap_or_else(|| user_id.clone());
                             let avatar_url = if !user_id.is_empty() {
                                 if let Some(ref hash) = claims.avatar {
-                                    format!("https://cdn.discordapp.com/avatars/{}/{}.webp", user_id, hash)
+                                    format!(
+                                        "https://cdn.discordapp.com/avatars/{}/{}.webp",
+                                        user_id, hash
+                                    )
                                 } else {
                                     let uid: u64 = user_id.parse().unwrap_or(0);
-                                    format!("https://cdn.discordapp.com/embed/avatars/{}.png", (uid >> 22) % 6)
+                                    format!(
+                                        "https://cdn.discordapp.com/embed/avatars/{}.png",
+                                        (uid >> 22) % 6
+                                    )
                                 }
                             } else {
                                 String::new()
                             };
-                            return Ok(AuthResult { username, token: t, avatar_url });
+                            return Ok(AuthResult {
+                                username,
+                                token: t,
+                                avatar_url,
+                            });
                         }
                         // 200 but no token field - keep polling
                         crate::lethe_log!("Poll returned 200 but no token in response");
@@ -85,7 +116,11 @@ pub async fn start_oauth_flow() -> Result<AuthResult, String> {
                     }
                     code => {
                         if attempts % 10 == 1 {
-                            crate::lethe_log!("Poll attempt {}: server returned HTTP {}", attempts, code);
+                            crate::lethe_log!(
+                                "Poll attempt {}: server returned HTTP {}",
+                                attempts,
+                                code
+                            );
                         }
                     }
                 }
@@ -117,9 +152,18 @@ fn jwt_claims(token: &str) -> JwtClaims {
     let decoded = base64_decode_url(parts[1]).unwrap_or_default();
     let json: serde_json::Value = serde_json::from_str(&decoded).unwrap_or_default();
     JwtClaims {
-        sub: json.get("sub").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        name: json.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        avatar: json.get("avatar").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        sub: json
+            .get("sub")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        name: json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        avatar: json
+            .get("avatar")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -131,11 +175,78 @@ fn generate_session_id() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buffer)
 }
 
+/// Path of the active profile's token file. This is the only source for
+/// the token injected into the game process.
+pub fn active_auth_path() -> PathBuf {
+    crate::profiles::active_auth_path()
+}
+
+/// Clear the in-memory token binding. Called on profile switch / logout.
+pub fn clear_auth_cache() {
+    if let Ok(mut guard) = auth_cache().lock() {
+        *guard = None;
+    }
+}
+
+/// Load a profile's token directly from disk, without touching the cache.
+/// Used by the profile list to report login status for every profile.
+pub fn load_saved_auth_for(profile_id: &str) -> Option<AuthResult> {
+    load_saved_auth_from_path(&crate::profiles::auth_path(profile_id))
+}
+
 pub fn load_saved_auth() -> Option<AuthResult> {
-    load_saved_auth_from(AUTH_FILE)
+    let id = crate::profiles::active_id();
+
+    // Only return the cached token when it belongs to the active profile.
+    if let Ok(guard) = auth_cache().lock() {
+        if let Some((cached_id, auth)) = guard.as_ref() {
+            if cached_id == &id {
+                return Some(auth.clone());
+            }
+        }
+    }
+
+    let path = crate::profiles::auth_path(&id);
+    let auth = load_saved_auth_from_path(&path)
+        // Fallback for an install that has not been migrated yet.
+        .or_else(|| load_saved_auth_from(AUTH_FILE));
+    if let Some(ref found) = auth {
+        if let Ok(mut guard) = auth_cache().lock() {
+            *guard = Some((id, found.clone()));
+        }
+    }
+    auth
+}
+
+/// Token state for the diagnostics panel. Never returns the token itself.
+pub fn token_status() -> crate::profiles::TokenStatus {
+    let id = crate::profiles::active_id();
+    let path = crate::profiles::auth_path(&id);
+    let expired = fs_token_expired(&path);
+    let auth = load_saved_auth();
+    crate::profiles::TokenStatus {
+        profile_id: id,
+        is_logged_in: auth.is_some(),
+        username: auth.as_ref().map(|a| a.username.clone()).unwrap_or_default(),
+        avatar_url: auth.map(|a| a.avatar_url).unwrap_or_default(),
+        expired,
+    }
+}
+
+fn fs_token_expired(path: &Path) -> bool {
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        if let Ok(auth) = serde_json::from_str::<AuthResult>(&contents) {
+            return is_token_expired(&auth.token) == Some(true);
+        }
+    }
+    false
 }
 
 pub fn load_saved_auth_from(path: &str) -> Option<AuthResult> {
+    load_saved_auth_from_path(&PathBuf::from(path))
+}
+
+fn load_saved_auth_from_path(path: &Path) -> Option<AuthResult> {
     if let Ok(contents) = std::fs::read_to_string(path) {
         if let Ok(auth) = serde_json::from_str::<AuthResult>(&contents) {
             if let Some(true) = is_token_expired(&auth.token) {
@@ -148,8 +259,26 @@ pub fn load_saved_auth_from(path: &str) -> Option<AuthResult> {
     None
 }
 
+/// Save the active profile's token into its own directory and mirror it to
+/// the root compatibility file.
 pub fn save_auth(auth: &AuthResult) {
-    save_auth_to(auth, AUTH_FILE);
+    let id = crate::profiles::active_id();
+    let profile_path = crate::profiles::auth_path(&id);
+    if let Ok(json) = serde_json::to_string_pretty(auth) {
+        if let Some(parent) = profile_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&profile_path, &json);
+        let _ = std::fs::write(AUTH_FILE, json);
+    }
+    if let Ok(mut guard) = auth_cache().lock() {
+        *guard = Some((id, auth.clone()));
+    }
+    crate::lethe_log!(
+        "Saved token for profile '{}' ({})",
+        crate::profiles::active_id(),
+        auth.username
+    );
 }
 
 pub fn save_auth_to(auth: &AuthResult, path: &str) {
@@ -158,15 +287,22 @@ pub fn save_auth_to(auth: &AuthResult, path: &str) {
     }
 }
 
+/// Logout only affects the active profile; other profiles keep their token.
 pub fn clear_saved_auth() {
+    let id = crate::profiles::active_id();
+    let _ = std::fs::remove_file(crate::profiles::auth_path(&id));
     let _ = std::fs::remove_file(AUTH_FILE);
+    clear_auth_cache();
+    crate::lethe_log!("Cleared token for profile '{}'", id);
 }
 
 /// Extract username from JWT payload. Tries common Discord OAuth claims.
 #[allow(dead_code)]
 pub fn extract_jwt_username(token: &str) -> Option<String> {
     let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 { return None; }
+    if parts.len() < 2 {
+        return None;
+    }
     let decoded = base64_decode_url(parts[1])?;
     let json: serde_json::Value = serde_json::from_str(&decoded).ok()?;
     // Try common Discord/OAuth claim names
@@ -180,20 +316,25 @@ pub fn extract_jwt_username(token: &str) -> Option<String> {
 
 fn is_token_expired(token: &str) -> Option<bool> {
     let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() < 2 { return None; }
+    if parts.len() < 2 {
+        return None;
+    }
     let payload = parts[1];
     let decoded = base64_decode_url(payload)?;
     let json: serde_json::Value = serde_json::from_str(&decoded).ok()?;
     let exp = json.get("exp")?.as_i64()?;
     let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH).ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
         .as_secs() as i64;
     Some(now >= exp)
 }
 
 fn base64_decode_url(input: &str) -> Option<String> {
     let mut b64 = input.replace('-', "+").replace('_', "/");
-    while b64.len() % 4 != 0 { b64.push('='); }
+    while b64.len() % 4 != 0 {
+        b64.push('=');
+    }
     let mut decoded = Vec::new();
     let decode_table = |c: u8| -> Option<u8> {
         match c {
@@ -207,14 +348,28 @@ fn base64_decode_url(input: &str) -> Option<String> {
     };
     let bytes: Vec<u8> = b64.bytes().filter(|&b| b != b'=').collect();
     for chunk in bytes.chunks(4) {
-        if chunk.len() < 2 { break; }
+        if chunk.len() < 2 {
+            break;
+        }
         let b0 = decode_table(chunk[0])?;
         let b1 = decode_table(chunk[1])?;
-        let b2 = if chunk.len() > 2 { decode_table(chunk[2]) } else { None };
-        let b3 = if chunk.len() > 3 { decode_table(chunk[3]) } else { None };
+        let b2 = if chunk.len() > 2 {
+            decode_table(chunk[2])
+        } else {
+            None
+        };
+        let b3 = if chunk.len() > 3 {
+            decode_table(chunk[3])
+        } else {
+            None
+        };
         decoded.push((b0 << 2) | (b1 >> 4));
-        if let Some(b2) = b2 { decoded.push(((b1 & 0x0F) << 4) | (b2 >> 2)); }
-        if let (Some(b2), Some(b3)) = (b2, b3) { decoded.push(((b2 & 0x03) << 6) | b3); }
+        if let Some(b2) = b2 {
+            decoded.push(((b1 & 0x0F) << 4) | (b2 >> 2));
+        }
+        if let (Some(b2), Some(b3)) = (b2, b3) {
+            decoded.push(((b2 & 0x03) << 6) | b3);
+        }
     }
     String::from_utf8(decoded).ok()
 }
@@ -236,11 +391,19 @@ fn open_browser(url: &str) -> Result<(), String> {
         }
     }
     #[cfg(target_os = "macos")]
-    { std::process::Command::new("open").arg(url).spawn()
-        .map_err(|e| format!("Failed to open browser: {}", e))?; }
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
     #[cfg(target_os = "linux")]
-    { std::process::Command::new("xdg-open").arg(url).spawn()
-        .map_err(|e| format!("Failed to open browser: {}", e))?; }
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| format!("Failed to open browser: {}", e))?;
+    }
     Ok(())
 }
 
@@ -269,7 +432,8 @@ mod tests {
 
     #[test]
     fn test_token_expired_future() {
-        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjI5OTk5OTk5OTksInN1YiI6InRlc3QifQ.sig";
+        let token =
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjI5OTk5OTk5OTksInN1YiI6InRlc3QifQ.sig";
         assert_eq!(is_token_expired(token), Some(false));
     }
 

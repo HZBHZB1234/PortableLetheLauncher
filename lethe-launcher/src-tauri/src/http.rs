@@ -125,7 +125,8 @@ mod tests {
 
     #[test]
     fn test_encode_path_is_idempotent_for_clean_input() {
-        let clean = "LimbusCompany_Data/StreamingAssets/Assets/Sound/FMODBuilds/Desktop/2D306B.assets.bank";
+        let clean =
+            "LimbusCompany_Data/StreamingAssets/Assets/Sound/FMODBuilds/Desktop/2D306B.assets.bank";
         assert_eq!(encode_path(clean), clean);
     }
 

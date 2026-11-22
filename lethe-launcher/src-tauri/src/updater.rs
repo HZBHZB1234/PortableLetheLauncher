@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-const UPDATE_URL: &str =
-    "https://github.com/LEAGUE-OF-NINE/LetheLauncher/releases/latest/download/latest.json";
+/// Default update feed. A profile can point at its own feed (or set an empty
+/// UpdateUrl to disable update checks entirely).
+pub fn update_url() -> String {
+    crate::profiles::active_profile().update_url
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct UpdateInfo {
@@ -16,7 +19,13 @@ pub struct UpdateInfo {
 /// Check for updates by fetching the latest.json from GitHub releases.
 /// Returns Some(UpdateInfo) if a newer version is available.
 pub async fn check_for_updates(current_version: &str) -> Result<Option<UpdateInfo>, String> {
-    let response = reqwest::get(UPDATE_URL)
+    let url = update_url();
+    if url.trim().is_empty() {
+        crate::lethe_log!("Update checks disabled for this profile");
+        return Ok(None);
+    }
+    crate::lethe_log!("Checking for updates at {}", url);
+    let response = reqwest::get(&url)
         .await
         .map_err(|e| format!("Failed to check for updates: {}", e))?;
 
@@ -125,12 +134,11 @@ pub async fn download_update(update: &UpdateInfo) -> Result<(), String> {
     crate::lethe_log!("Update checksum verified ({} bytes)", bytes.len());
 
     // Save as .new alongside the current executable
-    let current_exe = std::env::current_exe()
-        .map_err(|e| format!("Cannot get current exe path: {}", e))?;
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot get current exe path: {}", e))?;
     let new_exe = current_exe.with_extension("exe.new");
 
-    std::fs::write(&new_exe, &bytes)
-        .map_err(|e| format!("Failed to write update: {}", e))?;
+    std::fs::write(&new_exe, &bytes).map_err(|e| format!("Failed to write update: {}", e))?;
 
     crate::lethe_log!("Update downloaded to {}", new_exe.display());
 
@@ -156,13 +164,7 @@ pub async fn download_update(update: &UpdateInfo) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
-            .args([
-                "/C",
-                "start",
-                "",
-                "/min",
-                &script_path.to_string_lossy(),
-            ])
+            .args(["/C", "start", "", "/min", &script_path.to_string_lossy()])
             .spawn()
             .map_err(|e| format!("Failed to launch update script: {}", e))?;
         crate::lethe_log!("Update script launched; exiting to apply update");

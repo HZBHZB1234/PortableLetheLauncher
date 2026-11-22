@@ -9,8 +9,8 @@ pub fn get_steam_game_path() -> String {
     use winreg::enums::*;
     use winreg::RegKey;
 
-    if let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey(r"SOFTWARE\WOW6432Node\Valve\Steam")
+    if let Ok(key) =
+        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SOFTWARE\WOW6432Node\Valve\Steam")
     {
         if let Ok(steam_path) = key.get_value::<String, _>("InstallPath") {
             return format!(
@@ -44,30 +44,35 @@ pub async fn try_copy_from_steam(entry: &FileEntry) -> Result<bool, String> {
     }
 
     // Check size
-    let metadata = fs::metadata(&local_path)
-        .map_err(|e| format!("Cannot read metadata: {}", e))?;
+    let metadata = fs::metadata(&local_path).map_err(|e| format!("Cannot read metadata: {}", e))?;
     if metadata.len() != entry.size {
-        crate::lethe_log!("Size mismatch for local copy {}: expected {}, got {}",
-            entry.path, entry.size, metadata.len());
+        crate::lethe_log!(
+            "Size mismatch for local copy {}: expected {}, got {}",
+            entry.path,
+            entry.size,
+            metadata.len()
+        );
         return Ok(false);
     }
 
     // Check hash
     let hash = compute_xxhash64(&local_path)?;
     if hash != entry.xxhash {
-        crate::lethe_log!("Hash mismatch for local copy {}: expected {}, got {}",
-            entry.path, entry.xxhash, hash);
+        crate::lethe_log!(
+            "Hash mismatch for local copy {}: expected {}, got {}",
+            entry.path,
+            entry.xxhash,
+            hash
+        );
         return Ok(false);
     }
 
     // Copy to target
     if let Some(parent) = Path::new(&entry.path).parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create directory: {}", e))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Cannot create directory: {}", e))?;
     }
 
-    fs::copy(&local_path, &entry.path)
-        .map_err(|e| format!("Cannot copy {}: {}", entry.path, e))?;
+    fs::copy(&local_path, &entry.path).map_err(|e| format!("Cannot copy {}: {}", entry.path, e))?;
 
     crate::lethe_log!("Copied from local: {} ({} bytes)", entry.path, entry.size);
     Ok(true)

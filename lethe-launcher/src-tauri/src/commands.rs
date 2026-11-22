@@ -1,5 +1,9 @@
 use crate::downloader::{download_additional_dlls, download_files, StatusChangeEvent};
 use crate::manifest::FileEntry;
+use crate::profiles::{
+    Addresses, ConnectionTest, Diagnostics, NewsItem, PluginFile, Profile, ProfileInput,
+    ProfileSummary, TokenStatus,
+};
 use crate::verifier::{check_file, load_cache, save_cache, CheckResult};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -205,6 +209,19 @@ async fn do_start_sync(app_handle: AppHandle) -> Result<(), String> {
 /// Optionally pass an auth token as LETHE_TOKEN env var for the BepInEx mod.
 #[tauri::command]
 pub async fn launch(app_handle: AppHandle, token: Option<String>) -> Result<(), String> {
+    // Security: the token never comes from the WebView on trust. Resolve it
+    // from the active profile only; a stale frontend state after a profile
+    // switch must not inject the previous server's token into the game.
+    let active_token = crate::auth::load_saved_auth().map(|a| a.token);
+    if let Some(ref supplied) = token {
+        if active_token.as_deref() != Some(supplied.as_str()) {
+            crate::lethe_log!(
+                "Ignored token supplied by UI (does not match active profile '{}')",
+                crate::profiles::active_id()
+            );
+        }
+    }
+
     // Hide window
     if let Some(window) = app_handle.get_webview_window("main") {
         let _ = window.hide();
@@ -216,7 +233,7 @@ pub async fn launch(app_handle: AppHandle, token: Option<String>) -> Result<(), 
     crate::lethe_log!("Update complete. Starting game...");
 
     // Launch the game (this blocks until game exits)
-    crate::launcher::launch_game(token.as_deref())?;
+    crate::launcher::launch_game(active_token.as_deref())?;
 
     // Close the launcher after game exits
     if let Some(window) = app_handle.get_webview_window("main") {
@@ -229,7 +246,7 @@ pub async fn launch(app_handle: AppHandle, token: Option<String>) -> Result<(), 
 /// Get all launcher settings.
 #[tauri::command]
 pub fn get_settings() -> std::collections::HashMap<String, String> {
-    crate::config::read_config()
+    crate::config::read_active_config()
 }
 
 /// Set a launcher setting.
@@ -333,22 +350,109 @@ pub fn toggle_mod(name: String) -> Result<ModInfo, String> {
     let fulldisabled_path = mods_path.join(format!("FULLDISABLED_{}", name));
     let enabled_path = mods_path.join(&name);
 
-    if enabled_path.exists() {
+    let result = if enabled_path.exists() {
         // Currently enabled -> disable
         std::fs::rename(&enabled_path, &disabled_path)
             .map_err(|e| format!("Failed to disable mod: {}", e))?;
-        Ok(ModInfo { name, enabled: false })
+        ModInfo {
+            name: name.clone(),
+            enabled: false,
+        }
     } else if disabled_path.exists() {
         // Currently disabled -> enable
         std::fs::rename(&disabled_path, &enabled_path)
             .map_err(|e| format!("Failed to enable mod: {}", e))?;
-        Ok(ModInfo { name, enabled: true })
+        ModInfo {
+            name: name.clone(),
+            enabled: true,
+        }
     } else if fulldisabled_path.exists() {
         // Currently full-disabled -> enable
         std::fs::rename(&fulldisabled_path, &enabled_path)
             .map_err(|e| format!("Failed to enable mod: {}", e))?;
-        Ok(ModInfo { name, enabled: true })
+        ModInfo {
+            name: name.clone(),
+            enabled: true,
+        }
     } else {
-        Err(format!("Mod '{}' not found", name))
-    }
+        return Err(format!("Mod '{}' not found", name));
+    };
+    // Persist the toggle in the active profile so switching restores it.
+    crate::profiles::remember_mod_state(&result.name, result.enabled);
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// Profile management commands
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn profile_list() -> Result<Vec<ProfileSummary>, String> {
+    crate::profiles::profile_summaries()
+}
+
+#[tauri::command]
+pub fn profile_get(id: String) -> Result<Profile, String> {
+    crate::profiles::load_profile(&id)
+}
+
+#[tauri::command]
+pub fn profile_create(input: ProfileInput) -> Result<Profile, String> {
+    crate::profiles::create_profile(input)
+}
+
+#[tauri::command]
+pub fn profile_update(id: String, profile: Profile) -> Result<Profile, String> {
+    crate::profiles::update_profile(&id, profile)
+}
+
+#[tauri::command]
+pub fn profile_delete(id: String) -> Result<(), String> {
+    crate::profiles::delete_profile(&id)
+}
+
+#[tauri::command]
+pub fn profile_switch(id: String) -> Result<Profile, String> {
+    crate::profiles::switch_profile(&id)
+}
+
+#[tauri::command]
+pub async fn profile_test_connection(base: String) -> Result<ConnectionTest, String> {
+    Ok(crate::profiles::test_connection(base).await)
+}
+
+/// Alias used by the address editor's "Test" buttons.
+#[tauri::command]
+pub async fn server_url_test(url: String) -> Result<ConnectionTest, String> {
+    Ok(crate::profiles::test_connection(url).await)
+}
+
+#[tauri::command]
+pub fn profile_login_status() -> TokenStatus {
+    crate::auth::token_status()
+}
+
+#[tauri::command]
+pub fn profile_addresses() -> Addresses {
+    crate::profiles::addresses()
+}
+
+#[tauri::command]
+pub fn profile_apply_same_machine(id: String, port: u16, enabled: bool) -> Result<Profile, String> {
+    crate::profiles::apply_same_machine(&id, port, enabled)
+}
+
+#[tauri::command]
+pub fn profile_plugin_files() -> Vec<PluginFile> {
+    crate::downloader::plugin_files()
+}
+
+#[tauri::command]
+pub fn get_diagnostics() -> Diagnostics {
+    crate::profiles::diagnostics()
+}
+
+#[tauri::command]
+pub async fn get_news() -> Result<Vec<NewsItem>, String> {
+    crate::news::fetch_news().await
 }

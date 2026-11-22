@@ -2,10 +2,10 @@ use crate::manifest::FileEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::hash::Hasher;
 use std::io::Read;
 use std::path::Path;
 use twox_hash::XxHash64;
-use std::hash::Hasher;
 
 const CACHE_PATH: &str = "lethe-file-cache.json";
 
@@ -30,11 +30,14 @@ pub enum CheckResult {
 /// Compute XXHash64 of a file. Must match C# System.IO.Hashing.XxHash64 (seed=0).
 /// Returns 16-character lowercase hex string.
 pub fn compute_xxhash64(file_path: &str) -> Result<String, String> {
-    let mut file = fs::File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
+    let mut file =
+        fs::File::open(file_path).map_err(|e| format!("Cannot open {}: {}", file_path, e))?;
     let mut hasher = XxHash64::with_seed(0);
     let mut buffer = [0u8; 64 * 1024]; // 64KB chunks, matching C#
     loop {
-        let bytes_read = file.read(&mut buffer).map_err(|e| format!("Read error: {}", e))?;
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Read error: {}", e))?;
         if bytes_read == 0 {
             break;
         }
@@ -188,7 +191,11 @@ mod tests {
     fn test_check_file_size_mismatch() {
         let path = "test-size-mismatch.bin";
         fs::write(path, b"short").unwrap();
-        let entry = FileEntry { path: path.to_string(), size: 99999, xxhash: "abc".into() };
+        let entry = FileEntry {
+            path: path.to_string(),
+            size: 99999,
+            xxhash: "abc".into(),
+        };
         let mut cache = FileCache::default();
         assert_eq!(check_file(&entry, &mut cache), CheckResult::Mismatched);
         fs::remove_file(path).unwrap();
@@ -199,7 +206,11 @@ mod tests {
         let path = "test-hash-mismatch.bin";
         let data = b"some test data for hashing";
         fs::write(path, data).unwrap();
-        let entry = FileEntry { path: path.to_string(), size: data.len() as u64, xxhash: "0000000000000000".into() };
+        let entry = FileEntry {
+            path: path.to_string(),
+            size: data.len() as u64,
+            xxhash: "0000000000000000".into(),
+        };
         let mut cache = FileCache::default();
         assert_eq!(check_file(&entry, &mut cache), CheckResult::Mismatched);
         fs::remove_file(path).unwrap();
@@ -211,7 +222,11 @@ mod tests {
         let data = b"valid test file content";
         fs::write(path, data).unwrap();
         let correct_hash = compute_xxhash64(path).unwrap();
-        let entry = FileEntry { path: path.to_string(), size: data.len() as u64, xxhash: correct_hash };
+        let entry = FileEntry {
+            path: path.to_string(),
+            size: data.len() as u64,
+            xxhash: correct_hash,
+        };
 
         let mut cache = FileCache::default();
         assert_eq!(check_file(&entry, &mut cache), CheckResult::Valid);

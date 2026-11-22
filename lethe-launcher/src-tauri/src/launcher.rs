@@ -10,10 +10,16 @@ pub fn launch_game(auth_token: Option<&str>) -> Result<(), String> {
     // Set doorstop env var
     std::env::set_var("DOORSTOP_DISABLE_PROXY", "1");
 
-    // Set LETHE_TOKEN for the BepInEx mod to read (avoids browser polling flow)
+    // Always clear first: this process is long-lived and a previous launch in
+    // this session may have carried a token from a different profile.
+    std::env::remove_var("LETHE_TOKEN");
+    // Set LETHE_TOKEN for the BepInEx mod to read (avoids browser polling flow).
+    // The caller resolves this strictly from the active profile.
     if let Some(token) = auth_token {
         std::env::set_var("LETHE_TOKEN", token);
         crate::lethe_log!("LETHE_TOKEN set ({} chars)", token.len());
+    } else {
+        crate::lethe_log!("No active profile token; the game will use its own login flow");
     }
 
     let cwd = std::env::current_dir().map_err(|e| format!("Cannot get CWD: {}", e))?;

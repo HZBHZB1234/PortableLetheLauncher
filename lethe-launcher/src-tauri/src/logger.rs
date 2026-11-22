@@ -20,11 +20,7 @@ fn format_timestamp() -> String {
 
 pub fn init_logger() {
     let _guard = LOG_LOCK.lock().unwrap();
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LOG_PATH)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(LOG_PATH) {
         let ts = format_timestamp();
         let line = format!("=== Lethe Launcher Started at {} ===\n", ts);
         let _ = file.write_all(line.as_bytes());
@@ -37,11 +33,7 @@ pub fn log(msg: &str) {
     let ts = format_timestamp();
     let line = format!("{} {}\n", ts, msg);
     print!("{}", line);
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LOG_PATH)
-    {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(LOG_PATH) {
         let _ = file.write_all(line.as_bytes());
     }
 }

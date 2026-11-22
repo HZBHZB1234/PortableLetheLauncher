@@ -1,5 +1,6 @@
 use crate::http::{client, download_url};
 use crate::manifest::{FileEntry, FileManifest};
+use crate::profiles::{self, PluginFile};
 use crate::steam::try_copy_from_steam;
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -11,17 +12,34 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-const MANIFEST_URL: &str = "https://files.lethelc.site/lethe-manifest.json";
-const DOWNLOAD_BASE_URL: &str = "https://files.lethelc.site/download/";
+/// All endpoints come from the active profile. The constants below are only
+/// used to fill blank fields when a profile was created by an older launcher.
+pub fn manifest_url() -> String {
+    let profile = profiles::active_profile();
+    if profile.manifest_url.trim().is_empty() {
+        profiles::DEFAULT_MANIFEST_URL.to_string()
+    } else {
+        profile.manifest_url
+    }
+}
 
-const ADDITIONAL_DLLS: &[(&str, &str)] = &[
-    ("https://api.lethelc.site/Lethe.dll", "Lethe.dll"),
-    (
-        "https://api.lethelc.site/ModularSkillScripts.dll",
-        "ModularSkillScripts.dll",
-    ),
-    ("https://api.lethelc.site/motions.dll", "motions.dll"),
-];
+pub fn download_base_url() -> String {
+    let profile = profiles::active_profile();
+    if profile.download_base_url.trim().is_empty() {
+        profiles::DEFAULT_DOWNLOAD_BASE_URL.to_string()
+    } else {
+        profile.download_base_url
+    }
+}
+
+pub fn plugin_files() -> Vec<PluginFile> {
+    let profile = profiles::active_profile();
+    if profile.plugin_urls.is_empty() {
+        profiles::default_plugin_files()
+    } else {
+        profile.plugin_urls
+    }
+}
 
 /// Maximum files downloaded at once.
 ///
@@ -98,8 +116,10 @@ pub async fn download_manifest(app_handle: &AppHandle) -> Result<FileManifest, S
         },
     );
 
+    let manifest_url = manifest_url();
+    crate::lethe_log!("Manifest URL: {}", manifest_url);
     let response = client()
-        .get(MANIFEST_URL)
+        .get(&manifest_url)
         .send()
         .await
         .map_err(|e| format!("Failed to download manifest: {}", e))?;
@@ -325,11 +345,12 @@ fn ensure_parent(path: &str) -> Result<(), String> {
 /// what makes both the rate and the percentage track a single big file.
 async fn download_range(
     entry: &FileEntry,
+    base_url: &str,
     offset: u64,
     length: u64,
     progress: &ProgressTracker,
 ) -> Result<u64, String> {
-    let url = download_url(DOWNLOAD_BASE_URL, &entry.path);
+    let url = download_url(base_url, &entry.path);
     let end = offset + length - 1;
 
     let mut request = client().get(&url);
@@ -413,7 +434,11 @@ async fn download_range(
 }
 /// Download a single file to its final path, resuming from an existing part
 /// file and retrying transient failures with exponential backoff.
-async fn download_file(entry: &FileEntry, progress: &ProgressTracker) -> Result<(), String> {
+async fn download_file(
+    entry: &FileEntry,
+    base_url: &str,
+    progress: &ProgressTracker,
+) -> Result<(), String> {
     let part = part_path(&entry.path);
     let started = Instant::now();
 
@@ -498,7 +523,7 @@ async fn download_file(entry: &FileEntry, progress: &ProgressTracker) -> Result<
             // single large file still drives the bar and the rate. Only HTTP
             // traffic feeds the throughput estimate: counting local copies
             // here would spike the rate to hundreds of MB/s.
-            match download_range(entry, write_from, remaining, progress).await {
+            match download_range(entry, base_url, write_from, remaining, progress).await {
                 Ok(_) => {}
                 Err(e) => {
                     last_err = Some(e);
@@ -613,7 +638,12 @@ impl ActiveFiles {
         let label = if count > max_names {
             format!("{} files ({}, ...)", count, names.join(", "))
         } else {
-            format!("{} file{} ({})", count, if count == 1 { "" } else { "s" }, names.join(", "))
+            format!(
+                "{} file{} ({})",
+                count,
+                if count == 1 { "" } else { "s" },
+                names.join(", ")
+            )
         };
         (count, label)
     }
@@ -701,6 +731,9 @@ pub async fn download_files(
         return Ok(base_bytes);
     }
 
+    // Snapshot once: switching profiles mid-sync must not mix file sets.
+    let base_url = Arc::new(download_base_url());
+    crate::lethe_log!("Download base URL: {}", base_url);
     let progress = Arc::new(ProgressTracker::new(base_bytes));
     let active = Arc::new(ActiveFiles::new());
     let remaining = Arc::new(AtomicU64::new(files.len() as u64));
@@ -746,6 +779,7 @@ pub async fn download_files(
         let active = active.clone();
         let remaining = remaining.clone();
         let semaphore = semaphore.clone();
+        let base_url = base_url.clone();
 
         let handle = tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
@@ -767,7 +801,7 @@ pub async fn download_files(
                 }
             }
 
-            let result = download_file(&entry, &progress).await;
+            let result = download_file(&entry, &base_url, &progress).await;
 
             match &result {
                 Ok(()) => {
@@ -900,7 +934,10 @@ fn parse_content_range(
 
     let body = raw.strip_prefix("bytes").unwrap_or(raw).trim();
     let (range, total_str) = body.split_once('/').ok_or_else(malformed)?;
-    let start_str = range.split_once('-').map(|(s, _)| s).ok_or_else(malformed)?;
+    let start_str = range
+        .split_once('-')
+        .map(|(s, _)| s)
+        .ok_or_else(malformed)?;
 
     let start: u64 = start_str.trim().parse().map_err(|_| malformed())?;
     let total: u64 = total_str.trim().parse().map_err(|_| malformed())?;
@@ -1020,11 +1057,9 @@ async fn fetch_dll_once(
 
     // Promote into place. On Windows a rename over an existing file fails.
     if final_path.exists() {
-        fs::remove_file(final_path)
-            .map_err(|e| format!("Cannot replace {}: {}", filename, e))?;
+        fs::remove_file(final_path).map_err(|e| format!("Cannot replace {}: {}", filename, e))?;
     }
-    fs::rename(part, final_path)
-        .map_err(|e| format!("Cannot finalize {}: {}", filename, e))?;
+    fs::rename(part, final_path).map_err(|e| format!("Cannot finalize {}: {}", filename, e))?;
 
     crate::lethe_log!(
         "Downloaded additional DLL: {} ({} bytes)",
@@ -1110,11 +1145,14 @@ pub async fn download_additional_dlls(app_handle: &AppHandle) -> Result<(), Stri
         }
     });
 
-    let mut handles = Vec::with_capacity(ADDITIONAL_DLLS.len());
+    let plugins = plugin_files();
+    let mut handles = Vec::with_capacity(plugins.len());
 
-    for (url, filename) in ADDITIONAL_DLLS {
-        let url = (*url).to_string();
-        let filename = (*filename).to_string();
+    for plugin in plugins {
+        if plugin.url.trim().is_empty() || plugin.filename.trim().is_empty() {
+            continue;
+        }
+        let PluginFile { url, filename } = plugin;
         let dir = plugins_dir.clone();
         let progress = dll_progress.clone();
 
@@ -1215,7 +1253,10 @@ mod tests {
     fn test_parse_content_range_happy_path() {
         // "bytes 1024-2047/4096" => starts at 1024, 4096 total.
         let h = content_range("bytes 1024-2047/4096");
-        assert_eq!(parse_content_range(&h, 1024, "x.dll").unwrap(), (1024, 4096));
+        assert_eq!(
+            parse_content_range(&h, 1024, "x.dll").unwrap(),
+            (1024, 4096)
+        );
     }
 
     #[test]
@@ -1244,7 +1285,10 @@ mod tests {
         // Some origins omit the "bytes" unit. Accept it rather than failing
         // a resumable download over a cosmetic difference.
         let h = content_range("1024-2047/4096");
-        assert_eq!(parse_content_range(&h, 1024, "x.dll").unwrap(), (1024, 4096));
+        assert_eq!(
+            parse_content_range(&h, 1024, "x.dll").unwrap(),
+            (1024, 4096)
+        );
     }
 
     #[test]
@@ -1423,7 +1467,11 @@ mod tests {
         let (count, label) = active.summary(3);
         assert_eq!(count, 4);
         assert!(label.starts_with("4 files"), "label was {}", label);
-        assert!(label.contains("..."), "expected truncation marker: {}", label);
+        assert!(
+            label.contains("..."),
+            "expected truncation marker: {}",
+            label
+        );
     }
 
     #[test]
