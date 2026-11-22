@@ -517,12 +517,22 @@ fn save_profile_unlocked(profile: &Profile) -> Result<(), String> {
         .map_err(|e| format!("Cannot write profile.json: {}", e))?;
 
     // The per-profile ini is what the UI's generic settings command writes.
+    // Keep the existing validation toggle across profile edits.
+    let disable_auto_update = fs::read_to_string(ini_path(&id))
+        .ok()
+        .and_then(|text| Ini::load_from_str_noescape(&text).ok())
+        .and_then(|cfg| {
+            cfg.get_from(Some("General"), "DisableAutoUpdate")
+                .or_else(|| cfg.get_from(None::<String>, "DisableAutoUpdate"))
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "false".to_string());
     let mut cfg = Ini::new();
     cfg.with_section(Some("General"))
         .set("Name", profile.name.clone())
         .set("ProfileType", profile.profile_type.as_str().to_string())
         .set("ServerVersion", profile.server_version.clone())
-        .set("DisableAutoUpdate", "false");
+        .set("DisableAutoUpdate", disable_auto_update);
     cfg.with_section(Some("Addresses"))
         .set("AuthBaseUrl", profile.auth_base_url.clone())
         .set("ManifestUrl", profile.manifest_url.clone())

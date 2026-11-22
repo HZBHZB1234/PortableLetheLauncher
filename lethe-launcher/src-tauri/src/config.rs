@@ -56,16 +56,30 @@ pub fn create_default_config() {
 }
 
 fn set_in_file(path: &Path, key: &str, value: &str) {
-    let mut config = HashMap::new();
-    if let Ok(contents) = fs::read_to_string(path) {
-        parse_ini_text(&contents, &mut config);
+    let contents = fs::read_to_string(path).unwrap_or_default();
+    // Section-aware edit: a profile ini has [General]/[Addresses] sections,
+    // while the legacy root ini has no sections. Flattening them would destroy
+    // the profile file's structure on every settings toggle.
+    match ini::Ini::load_from_str_noescape(&contents) {
+        Ok(mut cfg) => {
+            if cfg.section(Some("General")).is_some() {
+                cfg.with_section(Some("General")).set(key, value);
+            } else {
+                cfg.with_section(None::<String>).set(key, value);
+            }
+            let _ = cfg.write_to_file(path);
+        }
+        Err(_) => {
+            let mut config = HashMap::new();
+            parse_ini_text(&contents, &mut config);
+            config.insert(key.to_string(), value.to_string());
+            let mut content = String::new();
+            for (k, v) in &config {
+                content.push_str(&format!("{}={}\n", k, v));
+            }
+            let _ = fs::write(path, content);
+        }
     }
-    config.insert(key.to_string(), value.to_string());
-    let mut content = String::new();
-    for (k, v) in &config {
-        content.push_str(&format!("{}={}\n", k, v));
-    }
-    let _ = fs::write(path, content);
 }
 
 /// Write a setting to both the profile ini and the root compatibility file.
@@ -95,5 +109,34 @@ mod tests {
     fn test_get_config_value_default() {
         let val = get_config_value("NonExistent", "default_val");
         assert_eq!(val, "default_val");
+    }
+
+    #[test]
+    fn test_set_in_file_preserves_sections() {
+        let path = std::env::temp_dir().join(format!(
+            "lethe-ini-test-{}-{}.ini",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            "[General]\nName = Local\nDisableAutoUpdate = false\n\n[Addresses]\nAuthBaseUrl = http://x\n",
+        )
+        .unwrap();
+        set_in_file(&path, "DisableAutoUpdate", "true");
+        let text = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+        let cfg = ini::Ini::load_from_str_noescape(&text).unwrap();
+        assert_eq!(
+            cfg.get_from(Some("General"), "DisableAutoUpdate"),
+            Some("true")
+        );
+        assert_eq!(
+            cfg.get_from(Some("Addresses"), "AuthBaseUrl"),
+            Some("http://x")
+        );
     }
 }
