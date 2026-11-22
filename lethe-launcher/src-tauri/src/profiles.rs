@@ -764,12 +764,17 @@ pub fn rewrite_game_cfg_at(path: &Path, profile: &Profile) -> Result<(), String>
                 // Keep the original spacing before the '=' and the indentation.
                 let prefix = line
                     .split_once('=')
-                    .map(|(p, _)| p.trim_end().to_string())
+                    .map(|(p, _)| p.to_string())
                     .unwrap_or_else(|| key.clone());
                 *line = format!("{}= {}", prefix, value);
                 seen.insert(key);
             }
         }
+    }
+    // [General] was the final section: missing keys belong at its end, not
+    // after the last other section in the file.
+    if in_general && general_end.is_none() {
+        general_end = Some(lines.len());
     }
 
     if seen.len() < wanted.len() {
@@ -1061,8 +1066,8 @@ mod tests {
         assert!(result.contains("## header"));
         assert!(result.contains("LogLevel = 2"));
         assert!(result.contains("# comment"));
-        assert!(result.contains("ServerRoot= http://127.0.0.1:8080/"));
-        assert!(result.contains("CachePath= ./NewCache"));
+        assert!(result.contains("ServerRoot = http://127.0.0.1:8080/"));
+        assert!(result.contains("CachePath = ./NewCache"));
         assert!(result.contains("IgnoreLauncherToken = true"));
         assert!(result.contains("CRCToggle = false"));
         assert!(!result.contains("https://old/"));
@@ -1094,6 +1099,47 @@ mod tests {
         assert_eq!(
             parsed2.get_from(Some("LaunchSettings"), "CRCToggle"),
             Some("false")
+        );
+    }
+
+    #[test]
+    fn test_game_cfg_inserts_missing_keys_inside_general() {
+        // [General] is the final section and none of the three keys exist.
+        let original = "## header\n[General]\nLogLevel = 2\n\n";
+        let profile = Profile::new("local", "Local", ProfileType::Private);
+        let path = std::env::temp_dir().join(format!(
+            "lethe-cfg-insert-{}-{}.cfg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, original).unwrap();
+        rewrite_game_cfg_at(&path, &profile).unwrap();
+        let result = fs::read_to_string(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        let parsed = Ini::load_from_str_noescape(&result).unwrap();
+        assert_eq!(
+            parsed.get_from(Some("General"), "ServerRoot"),
+            Some(DEFAULT_SERVER_ROOT)
+        );
+        assert_eq!(
+            parsed.get_from(Some("General"), "CachePath"),
+            Some(DEFAULT_CACHE_PATH)
+        );
+        assert_eq!(
+            parsed.get_from(Some("General"), "IgnoreLauncherToken"),
+            Some("true")
+        );
+        let general_pos = result.find("[General]").unwrap();
+        let insert_pos = result.find("ServerRoot").unwrap();
+        assert!(insert_pos > general_pos);
+        assert!(
+            !result[insert_pos..].contains('['),
+            "keys landed in another section: {}",
+            result
         );
     }
 }
