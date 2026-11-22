@@ -1,0 +1,111 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+    branches: [main, master]
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: |
+          cd lethe-launcher
+          npm ci
+
+      - name: Build Tauri app
+        run: |
+          cd lethe-launcher
+          npm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+
+      - name: Prepare release artifacts
+        shell: powershell
+        run: |
+          $exe = "lethe-launcher\src-tauri\target\release\LimbusCompany.exe"
+
+          # Raw exe is the release asset the updater downloads and swaps in place.
+          Copy-Item $exe -Destination "LimbusCompany.exe" -Force
+
+          # SHA-256 the exact bytes the updater will fetch, so the client can verify.
+          $sha = (Get-FileHash "LimbusCompany.exe" -Algorithm SHA256).Hash.ToLower()
+
+          # Generate latest.json for the updater
+          $version = (Get-Item $exe).VersionInfo.ProductVersion
+          if (-not $version) { $version = "0.0.0" }
+
+          $latestJson = @{
+            version = $version
+            notes = "Release ${{ github.ref_name }}"
+            download_url = "https://github.com/${{ github.repository }}/releases/latest/download/LimbusCompany.exe"
+            sha256 = $sha
+          } | ConvertTo-Json
+
+          $latestJson | Out-File -FilePath latest.json -Encoding utf8
+
+          Write-Host "Build version: $version"
+          Write-Host "SHA-256: $sha"
+          Write-Host "Artifacts:"
+          Get-ChildItem "LimbusCompany.exe", latest.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: LimbusCompany-build-${{ github.run_number }}
+          path: |
+            LimbusCompany.exe
+            latest.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            LimbusCompany.exe
+            latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create pre-release on push to main
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly-${{ github.run_number }}
+          name: Nightly Build (${{ github.run_number }})
+          body: |
+            🚀 Automated build from commit `${{ github.sha }}`
+
+            Download `LimbusCompany.exe` and place it in your game directory alongside `UnityPlayer.dll`.
+
+            The launcher will auto-detect this as the latest version via the updater.
+          files: |
+            LimbusCompany.exe
+            latest.json
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
