@@ -3,3 +3,10 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
+
+# Node / Tauri build outputs
+node_modules/
+dist/
+src-tauri/target/
+*.exe
+*.zip

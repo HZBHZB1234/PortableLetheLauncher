@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { StatusPanel } from "./components/StatusPanel";
 import { ProgressBar } from "./components/ProgressBar";
 import { FileIndicator } from "./components/FileIndicator";
@@ -10,6 +10,7 @@ import { useLauncher } from "./hooks/useLauncher";
 import { useAuth } from "./hooks/useAuth";
 import { useUpdater } from "./hooks/useUpdater";
 import { useSettings } from "./hooks/useSettings";
+import { useProfiles } from "./hooks/useProfiles";
 import { useEffect, useRef } from "react";
 
 function App() {
@@ -21,6 +22,7 @@ function App() {
     loginError,
     startLogin,
     logout,
+    refresh: refreshAuth,
   } = useAuth();
   const {
     updateAvailable,
@@ -36,10 +38,14 @@ function App() {
     isOpen: settingsOpen,
     setIsOpen: setSettingsOpen,
     toggleValidation,
+    refreshSettings,
+    refreshMods,
     toggleMod,
     enableAllMods,
     disableAllMods,
   } = useSettings();
+  const { profiles } = useProfiles();
+  const activeProfileName = profiles.find((p) => p.active)?.name ?? '—';
   const syncStarted = useRef(false);
   const {
     phase,
@@ -50,7 +56,18 @@ function App() {
     error,
     startSync,
     launchGame,
+    reset: resetLauncher,
   } = useLauncher(auth?.token ?? null);
+
+  // A profile switch changes every endpoint and login state. Drop all
+  // profile-bound state before reloading the token for the new profile.
+  const handleSwitched = useCallback(async () => {
+    syncStarted.current = false;
+    resetLauncher();
+    await refreshAuth();
+    await refreshSettings();
+    await refreshMods();
+  }, [resetLauncher, refreshAuth, refreshSettings, refreshMods]);
 
   // Start sync once authenticated (unless validation is skipped)
   useEffect(() => {
@@ -186,6 +203,10 @@ function App() {
         isOpen={settingsOpen}
         skipValidation={settings.skipValidation}
         onToggleValidation={toggleValidation}
+        onSwitched={handleSwitched}
+        auth={auth}
+        onLogin={startLogin}
+        onLogout={logout}
         onClose={() => setSettingsOpen(false)}
       />
 
@@ -344,8 +365,9 @@ function App() {
       )}
 
       {/* Footer */}
-      <div className="absolute bottom-4 text-[10px] text-stone-800 uppercase tracking-[0.2em]">
-        Lethe Launcher v0.1.0
+      <div className="absolute bottom-4 flex items-center gap-3 text-[10px] text-stone-800 uppercase tracking-[0.2em]">
+        <span>Lethe Launcher v0.1.0</span>
+        <span className="text-stone-700">· profile: {activeProfileName}</span>
       </div>
     </div>
   );

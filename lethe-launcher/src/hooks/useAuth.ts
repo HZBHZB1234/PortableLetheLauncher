@@ -9,6 +9,8 @@ interface UseAuthReturn {
   loginError: string | null;
   startLogin: () => Promise<void>;
   logout: () => Promise<void>;
+  /** Reload the token of the currently active profile (used after a switch). */
+  refresh: () => Promise<void>;
 }
 
 interface JwtPayload {
@@ -42,7 +44,7 @@ export function useAuth(): UseAuthReturn {
   const [loginError, setLoginError] = useState<string | null>(null);
 
   /** Populate username/avatar from the JWT payload */
-  function enrichAuth(raw: AuthResult): AuthResult {
+  const enrichAuth = useCallback((raw: AuthResult): AuthResult => {
     const claims = decodeJwt(raw.token);
     const userId = claims.sub;
     return {
@@ -50,16 +52,26 @@ export function useAuth(): UseAuthReturn {
       username: raw.username || userId || "Unknown",
       avatar_url: raw.avatar_url || (userId ? buildAvatarUrl(userId) : ""),
     };
-  }
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      // The backend resolves the token from the active profile only.
+      const saved = await invoke<AuthResult | null>("get_saved_auth");
+      setAuth(saved ? enrichAuth(saved) : null);
+      setLoginError(null);
+    } catch (e) {
+      console.error(e);
+      setAuth(null);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [enrichAuth]);
 
   useEffect(() => {
-    invoke<AuthResult | null>("get_saved_auth")
-      .then((saved) => {
-        if (saved) setAuth(enrichAuth(saved));
-      })
-      .catch(console.error)
-      .finally(() => setIsLoading(false));
-  }, []);
+    void refresh();
+  }, [refresh]);
 
   const startLogin = useCallback(async () => {
     setIsLoading(true);
@@ -73,7 +85,7 @@ export function useAuth(): UseAuthReturn {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [enrichAuth]);
 
   const logout = useCallback(async () => {
     await invoke("logout");
@@ -87,5 +99,6 @@ export function useAuth(): UseAuthReturn {
     loginError,
     startLogin,
     logout,
+    refresh,
   };
 }

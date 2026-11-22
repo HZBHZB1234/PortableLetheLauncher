@@ -18,15 +18,22 @@ interface LauncherState {
   error: string | null;
 }
 
+const INITIAL_STATE: LauncherState = {
+  phase: 'idle',
+  statusMessage: 'Initializing...',
+  checkProgress: null,
+  downloadProgress: null,
+  currentFile: '',
+  error: null,
+};
+
 export function useLauncher(authToken: string | null) {
-  const [state, setState] = useState<LauncherState>({
-    phase: 'idle',
-    statusMessage: 'Initializing...',
-    checkProgress: null,
-    downloadProgress: null,
-    currentFile: '',
-    error: null,
-  });
+  const [state, setState] = useState<LauncherState>(INITIAL_STATE);
+
+  /** Drop all state tied to the previous profile after a switch. */
+  const reset = useCallback(() => {
+    setState(INITIAL_STATE);
+  }, []);
 
   // Keep authToken in a ref so the sync-complete listener always has the latest
   const tokenRef = useRef(authToken);
@@ -125,5 +132,5 @@ export function useLauncher(authToken: string | null) {
     return () => { unlisteners.forEach((fn) => fn()); };
   }, []);
 
-  return { ...state, startSync, launchGame };
+  return { ...state, startSync, launchGame, reset };
 }

@@ -11,15 +11,20 @@ export function useSettings() {
   const [isOpen, setIsOpen] = useState(false);
   const [mods, setMods] = useState<ModInfo[]>([]);
 
-  useEffect(() => {
-    invoke<Record<string, string>>('get_settings')
-      .then((config) => {
-        setSettings({
-          skipValidation: (config['DisableAutoUpdate'] || 'false').toLowerCase() === 'true',
-        });
-      })
-      .catch(console.error);
+  const refreshSettings = useCallback(async () => {
+    try {
+      const config = await invoke<Record<string, string>>('get_settings');
+      setSettings({
+        skipValidation: (config['DisableAutoUpdate'] || 'false').toLowerCase() === 'true',
+      });
+    } catch (e) {
+      console.error(e);
+    }
   }, []);
+
+  useEffect(() => {
+    void refreshSettings();
+  }, [refreshSettings]);
 
   const toggleValidation = useCallback(async () => {
     const newValue = !settings.skipValidation;
@@ -67,5 +72,5 @@ export function useSettings() {
     refreshMods();
   }, [refreshMods]);
 
-  return { settings, mods, isOpen, setIsOpen, toggleValidation, refreshMods, toggleMod, enableAllMods, disableAllMods };
+  return { settings, mods, isOpen, setIsOpen, toggleValidation, refreshSettings, refreshMods, toggleMod, enableAllMods, disableAllMods };
 }
