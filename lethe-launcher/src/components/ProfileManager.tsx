@@ -14,7 +14,7 @@ interface ProfileManagerProps {
 
 const DEFAULT_FORM: ProfileInput = {
   name: '',
-  profileType: 'private',
+  type: 'private',
   serverVersion: '',
   authBaseUrl: '',
   manifestUrl: '',
@@ -127,7 +127,7 @@ export function ProfileManager({ onSwitched, auth, onLogin, onLogout }: ProfileM
       const updated: Profile = {
         ...current,
         name: form.name || current.name,
-        profileType: form.profileType ?? current.profileType,
+        type: form.type ?? current.type,
         serverVersion: form.serverVersion ?? '',
         authBaseUrl: form.authBaseUrl ?? '',
         manifestUrl: form.manifestUrl ?? '',
@@ -199,7 +199,7 @@ export function ProfileManager({ onSwitched, auth, onLogin, onLogout }: ProfileM
                 {p.active && <span className="ml-2 text-[9px] text-emerald-500">ACTIVE</span>}
               </p>
               <p className="text-[9px] text-stone-600 truncate font-mono">
-                {p.profileType} · {p.serverRoot}
+                {p.type} · {p.serverRoot}
               </p>
             </div>
             <div className="flex items-center gap-1 shrink-0">
@@ -254,9 +254,9 @@ export function ProfileManager({ onSwitched, auth, onLogin, onLogout }: ProfileM
               <label className={labelClass}>Type</label>
               <select
                 className={inputClass}
-                value={form.profileType ?? 'private'}
+                value={form.type ?? 'private'}
                 onChange={(e) =>
-                  setForm({ ...form, profileType: e.target.value as ProfileType })
+                  setForm({ ...form, type: e.target.value as ProfileType })
                 }
               >
                 <option value="private">private</option>

@@ -14,7 +14,7 @@ export interface ModState {
 export interface Profile {
   id: string;
   name: string;
-  profileType: ProfileType;
+  type: ProfileType;
   serverVersion: string;
   authBaseUrl: string;
   manifestUrl: string;
@@ -33,7 +33,7 @@ export interface Profile {
 export interface ProfileInput {
   id?: string;
   name: string;
-  profileType?: ProfileType;
+  type?: ProfileType;
   serverVersion?: string;
   authBaseUrl?: string;
   manifestUrl?: string;
@@ -51,7 +51,7 @@ export interface ProfileInput {
 export interface ProfileSummary {
   id: string;
   name: string;
-  profileType: ProfileType;
+  type: ProfileType;
   active: boolean;
   serverVersion: string;
   serverRoot: string;

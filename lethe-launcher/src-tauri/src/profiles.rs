@@ -121,7 +121,7 @@ pub struct ProfileInput {
     #[serde(default)]
     pub id: String,
     pub name: String,
-    #[serde(default)]
+    #[serde(rename = "type", alias = "profileType", default)]
     pub profile_type: ProfileType,
     #[serde(default)]
     pub server_version: String,
@@ -999,6 +999,24 @@ mod tests {
         assert_eq!(p.download_base_url, DEFAULT_DOWNLOAD_BASE_URL);
         assert_eq!(p.plugin_urls.len(), 3);
         assert!(p.ignore_launcher_token);
+    }
+
+    #[test]
+    fn test_profile_json_shape_matches_frontend() {
+        let profile = Profile::new("local", "Local", ProfileType::Private);
+        let json = serde_json::to_value(&profile).unwrap();
+        assert_eq!(json["type"], "private");
+        assert!(json["authBaseUrl"].is_string());
+        assert!(json["pluginUrls"].is_array());
+        assert!(json.get("profileType").is_none());
+
+        // The admin panel sends `type`, not the Rust field name.
+        let input: ProfileInput = serde_json::from_str(
+            r#"{"name":"Local","type":"private","authBaseUrl":"http://127.0.0.1:8080"}"#,
+        )
+        .unwrap();
+        assert_eq!(input.profile_type, ProfileType::Private);
+        assert_eq!(input.auth_base_url, "http://127.0.0.1:8080");
     }
 
     #[test]

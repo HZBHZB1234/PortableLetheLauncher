@@ -6,7 +6,7 @@ import type { Profile, Diagnostics } from '../types/profile';
 const profile: Profile = {
   id: 'local',
   name: 'Local server',
-  profileType: 'private',
+  type: 'private',
   serverVersion: '1.2.4',
   authBaseUrl: 'http://127.0.0.1:8080',
   manifestUrl: 'http://127.0.0.1:8080/lethe-manifest.json',
@@ -53,7 +53,7 @@ vi.mock('@tauri-apps/api/core', () => ({
           {
             id: 'local',
             name: 'Local server',
-            profileType: 'private',
+            type: 'private',
             active: true,
             serverVersion: '1.2.4',
             serverRoot: profile.serverRoot,
@@ -63,7 +63,7 @@ vi.mock('@tauri-apps/api/core', () => ({
           {
             id: 'official',
             name: 'Official',
-            profileType: 'official',
+            type: 'official',
             active: false,
             serverVersion: '',
             serverRoot: 'https://api.lethelc.site/',
