@@ -1,6 +1,75 @@
-# Lethe Launcher
+# Portable Lethe Launcher
 
-A custom launcher for Limbus Company that provides intelligent file management, Steam integration, and modding support via BepInEx.
+A **portable, prebuilt** Limbus Company launcher for private and official
+server instances. It keeps server addresses, login state and mod toggles in
+per-profile directories, so one game installation can switch servers without
+rebuilding or editing source code.
+
+The launcher is a single `LimbusCompany.exe` that must be placed next to
+`UnityPlayer.dll` in the game directory. Every path it touches is relative to
+its working directory. The Hub downloads the prebuilt zip from GitHub
+Releases; it never compiles Rust.
+
+> ZylarNex is **not** bundled or referenced by this repository. It belongs only
+> to an official-server setup the user installs themselves. Private profiles
+> use the Lethe browser-login flow against their own `ServerRoot`.
+
+## Features
+
+* **Server profiles** — create/edit/switch private or official profiles from
+  the in-app Admin Panel. All six formerly hardcoded URLs are per-profile:
+  `AuthBaseUrl`, `ManifestUrl`, `DownloadBaseUrl`, `PluginUrls[]`, `NewsUrl`,
+  `UpdateUrl`.
+* **Game-side switching** — a switch rewrites `ServerRoot`,
+  `IgnoreLauncherToken` and `CachePath` in `BepInEx/config/Lethe.cfg` while
+  preserving all other settings and comments. Startup does not rewrite the
+  cfg, so Hub-generated instance configs are respected.
+* **Login isolation** — one `lethe-auth.json` per profile, in-memory token
+  bound to the active profile id, and `LETHE_TOKEN` injected into the game
+  only from that file. Switching clears the cached token; expired JWTs are
+  removed and require a fresh login.
+* **Same-machine helper** — tick "Same-machine mode", enter the local server
+  port and apply: auth/manifest/download/server-root addresses are generated
+  automatically, and `IgnoreLauncherToken` is enabled.
+* **Connection test** — `GET <base>/health` with latency and HTTP status.
+* **Mod toggles** — the existing `BepInEx/plugins/Lethe/mods` folder switch is
+  remembered per profile and reapplied when switching.
+* **Diagnostics** — log tail, active profile, addresses, and token status
+  (valid / expired / none) without ever printing the token itself.
+
+## Directory layout
+
+```
+<game dir>/
+  LimbusCompany.exe
+  UnityPlayer.dll
+  BepInEx/config/Lethe.cfg
+  lethe-launcher.ini            # root compatibility file (mirrored from active profile)
+  lethe-auth.json               # root compatibility file (mirrored from active profile)
+  lethe-launcher.log
+  lethe-profiles/
+    profiles.json               # { active, profiles: [<id>] }
+    <id>/profile.json
+    <id>/lethe-auth.json
+    <id>/lethe-launcher.ini
+```
+
+See [PROFILE_FORMAT.md](PROFILE_FORMAT.md) for the full JSON schema and
+defaults.
+
+## Using the launcher
+
+1. Unpack `PortableLetheLauncher-win-x64.zip` into the game directory (next to
+   `UnityPlayer.dll`) and run `LimbusCompany.exe`.
+2. On first run a `local` private profile is created and any legacy root
+   `lethe-auth.json` is migrated into it.
+3. Click the gear icon (**Admin Panel**) → **Servers** to add profiles, edit
+   addresses, test `/health`, and switch. **General** holds the file-validation
+   toggle; **Diagnostics** shows the log tail and token state.
+4. Log in with the active profile (the login page opens in your browser). The
+   token is stored in that profile's directory only.
+5. Launch the game. `LETHE_TOKEN` comes from the active profile; when there is
+   no valid token the game runs its own browser login against `ServerRoot`.
 
 ## Building
 
@@ -13,72 +82,48 @@ npm run tauri build
 ```
 
 The binary lands at `src-tauri/target/release/LimbusCompany.exe`.
+`bundle.active` is `false` in `tauri.conf.json`, so only the portable exe is
+produced. A bare `cargo build --release` bypasses the Tauri CLI and produces an
+exe that tries to load `http://localhost:5173` instead of the bundled frontend.
 
-`bundle.active` is `false` in `tauri.conf.json`, so no installer is produced —
-only the portable exe. It is meant to be dropped into the game directory next
-to `UnityPlayer.dll`; every path it touches is relative to its working
-directory.
+> Local build tip: set `CARGO_TARGET_DIR` to a drive with free space. All E:
+> drive paths in this workspace are space-constrained, and the debug target
+> tree can exceed 1 GB.
 
-> **Do not build with `cargo build --release` directly.** It bypasses the Tauri
-> CLI, which leaves `tauri-build` unable to see the dev/prod signal
-> (`DEP_TAURI_DEV`). The resulting exe is compiled in release mode but still
-> loads `devUrl` (`http://localhost:5173`) at runtime and shows
-> `ERR_CONNECTION_REFUSED` instead of the bundled frontend. The window title
-> will look correct regardless, so this is easy to miss — check the WebView
-> title via the UI Automation tree, or simply open the app.
+## Releasing
 
-## Downloads
+`.github/workflows/build.yml` builds on `windows-latest` and uploads:
 
-Files are fetched with up to 4 concurrent connections. The manifest is
-roughly 2000 files / 11.8 GB, and the host serves HTTP/1.1 with no edge
-caching, so throughput is limited by per-connection rate rather than by
-the link. Measured against the live endpoint (4 x ~15 MB files, 58.9 MB
-total):
-
-| Configuration | Throughput |
+| Asset | Purpose |
 | --- | --- |
-| Sequential | 0.95 MB/s |
-| 4 files in parallel | 1.44 MB/s |
-| 8 files in parallel | 1.56 MB/s |
-| 12 files in parallel | 1.75 MB/s |
+| `PortableLetheLauncher-win-x64.zip` | Hub distribution unit (exe + README + profile format doc) |
+| `LimbusCompany.exe` | Raw exe consumed by the self-updater's `latest.json` |
+| `latest.json` | Update manifest with SHA-256 of the raw exe |
+| `SHA256SUMS.txt` | Checksums of exe and zip |
 
-4 is the knee of that curve, which is why it is the default. Files at or
-above 100 MB are additionally split into 2 HTTP `Range` requests, which
-only helps on top of file-level parallelism.
+Push to `main`/`master` produces a nightly pre-release; publishing a GitHub
+Release attaches the same assets. Verify the SHA-256 before shipping a package.
 
-Downloads are resumable and retried:
+The default update feed is
+`https://github.com/HZBHZB1234/PortableLetheLauncher/releases/latest/download/latest.json`.
+Profiles may override it with their own `updateUrl`, or set it to an empty
+string to disable update checks.
 
-- Each file is written to `<path>.lethe-part` and only renamed into
-  place once its size matches the manifest, so an interrupted run never
-  leaves a truncated file behind. A 1.36 GB download resumes instead of
-  restarting.
-- A transient failure is retried up to 4 times with exponential backoff
-  (500 ms, doubling, capped at 8 s). Ranges already written are skipped
-  on retry.
-- A single `reqwest::Client` is shared process-wide so the TLS handshake
-  is paid once per connection instead of once per file.
+## Verification (this checkout)
 
-The progress bar reports aggregate throughput and an estimated remaining
-time. The rate is smoothed (EMA, weight 0.3) because a single 250 ms
-window swings too much to display raw.
+* `cargo test --offline --lib` — Rust unit tests, including a real
+  `BepInEx/config/Lethe.cfg` rewrite test that verifies comments and unrelated
+  settings survive two consecutive profile switches.
+* `npm run build` — TypeScript typecheck + Vite bundle.
+* `npm test` — Vitest component tests including the admin panel.
 
-## Logging
+## Known limitations / stubs
 
-All operations are logged to `lethe-launcher.log` with timestamps:
-
-```
-=== Lethe Launcher Started at 2025-10-26 12:43:48 ===
-[12:43:48] Configuration loaded from lethe-launcher.ini:
-[12:43:48]   DisableAutoUpdate = false
-[12:43:49] Downloaded manifest: 150 files, 2048576 bytes
-[12:43:49] Starting file synchronization...
-[12:43:50] Copied from local: Data/file.dat (1.2 MB)
-[12:43:51] Downloaded: Assets/texture.png (512 KB, 1.4 MB/s, 1 attempt(s), 0.4s)
-[12:43:51] Resuming Big/asset.resS from 2147483648 (2.0 GB already downloaded)
-[12:43:52] Update complete. Starting game...
-[12:43:52] ✓ Found UnityPlayer.dll at: C:\Game\UnityPlayer.dll
-[12:43:52] ✓ UnityPlayer.dll loaded successfully
-[12:43:52] ✓ doorstop.dll loaded successfully
-[12:43:52] UnityMain returned: 0
-```
-
+* The news feed is a thin JSON fetcher for `NewsUrl`; an empty URL disables it.
+  No news endpoint is bundled.
+* No automatic migration of per-profile mod folders from an upstream install
+  exists: `mods` starts empty and is populated by UI toggles.
+* No ledger of launcher ↔ server protocol compatibility is enforced;
+  `serverVersion` is documentation metadata shown in the UI.
+* The GitHub remote for this repository may not exist yet; nothing is pushed
+  from this workspace.

@@ -1,5 +1,8 @@
-name: Build and Release
+name: Build and Release (portable)
 
+# Produces prebuilt portable artifacts only. The Hub downloads these; it never
+# compiles Rust. The raw exe is kept for the launcher's self-updater, and the
+# zip is the distribution unit for a game/client package.
 on:
   push:
     branches: [main, master]
@@ -10,6 +13,7 @@ on:
     branches: [main, master]
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -25,19 +29,27 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: npm
+          cache-dependency-path: lethe-launcher/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
+        working-directory: lethe-launcher
+        run: npm ci
+
+      - name: Verify frontend and Rust units
+        working-directory: lethe-launcher
         run: |
-          cd lethe-launcher
-          npm ci
+          npm run build
+          npm test
+          cd src-tauri
+          cargo test --lib
 
       - name: Build Tauri app
-        run: |
-          cd lethe-launcher
-          npm run tauri build
+        working-directory: lethe-launcher
+        run: npm run tauri build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
@@ -46,14 +58,29 @@ jobs:
         shell: powershell
         run: |
           $exe = "lethe-launcher\src-tauri\target\release\LimbusCompany.exe"
+          if (-not (Test-Path $exe)) { throw "Build output missing: $exe" }
 
-          # Raw exe is the release asset the updater downloads and swaps in place.
+          # Raw exe: the updater downloads and swaps this exact file.
           Copy-Item $exe -Destination "LimbusCompany.exe" -Force
 
-          # SHA-256 the exact bytes the updater will fetch, so the client can verify.
-          $sha = (Get-FileHash "LimbusCompany.exe" -Algorithm SHA256).Hash.ToLower()
+          # Portable zip: what the Hub downloads to assemble a client package.
+          $stage = "portable-staging"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item $exe -Destination "$stage\LimbusCompany.exe" -Force
+          Copy-Item "README.md" -Destination "$stage\README.md" -Force
+          Copy-Item "PROFILE_FORMAT.md" -Destination "$stage\PROFILE_FORMAT.md" -Force
+          $zip = "PortableLetheLauncher-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$stage\*" -DestinationPath $zip
 
-          # Generate latest.json for the updater
+          # SHA-256 of the exact bytes clients fetch.
+          $shaExe = (Get-FileHash "LimbusCompany.exe" -Algorithm SHA256).Hash.ToLower()
+          $shaZip = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          @(
+            "$shaExe  LimbusCompany.exe",
+            "$shaZip  $zip"
+          ) | Out-File -FilePath "SHA256SUMS.txt" -Encoding ascii
+
           $version = (Get-Item $exe).VersionInfo.ProductVersion
           if (-not $version) { $version = "0.0.0" }
 
@@ -61,23 +88,24 @@ jobs:
             version = $version
             notes = "Release ${{ github.ref_name }}"
             download_url = "https://github.com/${{ github.repository }}/releases/latest/download/LimbusCompany.exe"
-            sha256 = $sha
+            sha256 = $shaExe
           } | ConvertTo-Json
 
           $latestJson | Out-File -FilePath latest.json -Encoding utf8
 
           Write-Host "Build version: $version"
-          Write-Host "SHA-256: $sha"
-          Write-Host "Artifacts:"
-          Get-ChildItem "LimbusCompany.exe", latest.json
+          Get-Content "SHA256SUMS.txt"
+          Get-ChildItem "LimbusCompany.exe", $zip, "latest.json", "SHA256SUMS.txt"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LimbusCompany-build-${{ github.run_number }}
+          name: PortableLetheLauncher-build-${{ github.run_number }}
           path: |
             LimbusCompany.exe
+            PortableLetheLauncher-win-x64.zip
             latest.json
+            SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14
 
@@ -87,7 +115,11 @@ jobs:
         with:
           files: |
             LimbusCompany.exe
+            PortableLetheLauncher-win-x64.zip
             latest.json
+            SHA256SUMS.txt
+          body_path: SHA256SUMS.txt
+          append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -98,14 +130,16 @@ jobs:
           tag_name: nightly-${{ github.run_number }}
           name: Nightly Build (${{ github.run_number }})
           body: |
-            🚀 Automated build from commit `${{ github.sha }}`
+            🚀 Automated portable build from commit `${{ github.sha }}`.
 
-            Download `LimbusCompany.exe` and place it in your game directory alongside `UnityPlayer.dll`.
-
-            The launcher will auto-detect this as the latest version via the updater.
+            Download `PortableLetheLauncher-win-x64.zip`, unpack it into the game
+            directory next to `UnityPlayer.dll`, and run `LimbusCompany.exe`.
+            Checksums are attached as `SHA256SUMS.txt`.
           files: |
             LimbusCompany.exe
+            PortableLetheLauncher-win-x64.zip
             latest.json
+            SHA256SUMS.txt
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
